@@ -8,7 +8,15 @@
     <br />
     内置现代化管理后台，支持多账号轮询、Token 自动刷新、密钥管理与实时监控。
   </p>
+  <p>
+    <a href="https://github.com/lwl2005/Antigravity-">
+      <img src="https://img.shields.io/badge/原项目-lwl2005/Antigravity-blue?style=flat-square&logo=github" alt="Original Project" />
+    </a>
+  </p>
 </div>
+
+> [!NOTE]
+> 本项目基于 [lwl2005/Antigravity-](https://github.com/lwl2005/Antigravity-) 进行开发和优化。
 
 ---
 
