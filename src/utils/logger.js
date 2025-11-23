@@ -10,12 +10,12 @@ const colors = {
 function logMessage(level, ...args) {
   const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   const color = { info: colors.green, warn: colors.yellow, error: colors.red }[level];
-  console.log(`${colors.gray}${timestamp}${colors.reset} ${color}[${level}]${colors.reset}`, ...args);
+  console.error(`${colors.gray}${timestamp}${colors.reset} ${color}[${level}]${colors.reset}`, ...args);
 }
 
 function logRequest(method, path, status, duration) {
   const statusColor = status >= 500 ? colors.red : status >= 400 ? colors.yellow : colors.green;
-  console.log(`${colors.cyan}[${method}]${colors.reset} - ${path} ${statusColor}${status}${colors.reset} ${colors.gray}${duration}ms${colors.reset}`);
+  console.error(`${colors.cyan}[${method}]${colors.reset} - ${path} ${statusColor}${status}${colors.reset} ${colors.gray}${duration}ms${colors.reset}`);
 }
 
 export const log = {

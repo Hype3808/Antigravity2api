@@ -123,7 +123,18 @@ export async function getAvailableModels() {
     body: JSON.stringify({})
   });
 
-  const data = await response.json();
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`获取模型列表失败 (${response.status}): ${errorText}`);
+  }
+
+  const responseText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(responseText);
+  } catch (e) {
+    throw new Error(`JSON解析失败: ${e.message}. 原始响应: ${responseText.substring(0, 200)}`);
+  }
 
   return {
     object: 'list',
