@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { generateAssistantResponse, getAvailableModels } from '../api/client.js';
+import { generateAssistantResponse, generateCompleteResponse, getAvailableModels } from '../api/client.js';
 import { generateRequestBody } from '../utils/utils.js';
 import logger from '../utils/logger.js';
 import config from '../config/config.js';
@@ -122,6 +122,13 @@ app.use('/admin', adminRoutes);
 app.get('/v1/models', async (req, res) => {
   try {
     const models = await getAvailableModels();
+    // Add fake streaming models with 假流式/ prefix
+    const fakeStreamingModels = models.data.map(model => ({
+      ...model,
+      id: `假流式/${model.id}`,
+      created: Math.floor(Date.now() / 1000)
+    }));
+    models.data = [...models.data, ...fakeStreamingModels];
     res.json(models);
   } catch (error) {
     logger.error('获取模型列表失败:', error.message);
@@ -137,6 +144,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(400).json({ error: 'messages is required' });
     }
 
+    // Check if fake streaming is requested
+    const isFakeStreaming = model && model.startsWith('假流式/');
+    let actualModel = model;
+    if (isFakeStreaming) {
+      actualModel = model.slice('假流式/'.length);
+    }
+
     // 智能检测：NewAPI测速请求通常消息很简单，强制使用非流式响应
     // 检测条件：单条消息 + 内容很短（如 "hi", "test" 等）
     const isSingleShortMessage = messages.length === 1 &&
@@ -147,14 +161,88 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (isSingleShortMessage && req.body.stream === undefined) {
       stream = false;
     }
-
+    
     const authHeader = req.headers.authorization;
     const apiKey = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-
     const requestBody = generateRequestBody(messages, model, params, tools, apiKey);
 
+    // Handle fake streaming
+    if (isFakeStreaming && stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
 
-    if (stream) {
+      const id = `chatcmpl-${Date.now()}`;
+      const created = Math.floor(Date.now() / 1000);
+
+      // Send empty chunks every 3 seconds while waiting for response
+      const sendEmptyChunk = () => {
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+          })}\n\n`);
+        }
+      };
+
+      // Send initial role
+      res.write(`data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+      })}\n\n`);
+
+      // Start sending empty chunks every 3 seconds
+      const interval = setInterval(sendEmptyChunk, 3000);
+
+      try {
+        // Fetch complete non-streaming response
+        const { fullContent, toolCalls } = await generateCompleteResponse(requestBody);
+
+        // Send tool calls if any
+        if (toolCalls.length > 0) {
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { tool_calls: toolCalls }, finish_reason: null }]
+          })}\n\n`);
+        }
+
+        // Send content
+        if (fullContent) {
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: fullContent }, finish_reason: null }]
+          })}\n\n`);
+        }
+
+        // Send finish
+        res.write(`data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop' }]
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+      } finally {
+        clearInterval(interval);
+        res.end();
+      }
+      return;
+    }
+
+    if (stream && !isFakeStreaming) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -193,16 +281,24 @@ app.post('/v1/chat/completions', async (req, res) => {
       })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
-    } else {
+    } else if (!stream) {
+      // Non-streaming response - use generateCompleteResponse for fake streaming models
       let fullContent = '';
       let toolCalls = [];
-      await generateAssistantResponse(requestBody, (data) => {
-        if (data.type === 'tool_calls') {
-          toolCalls = data.tool_calls;
-        } else {
-          fullContent += data.content;
-        }
-      });
+      
+      if (isFakeStreaming) {
+        const result = await generateCompleteResponse(requestBody);
+        fullContent = result.fullContent;
+        toolCalls = result.toolCalls;
+      } else {
+        await generateAssistantResponse(requestBody, (data) => {
+          if (data.type === 'tool_calls') {
+            toolCalls = data.tool_calls;
+          } else {
+            fullContent += data.content;
+          }
+        });
+      }
 
       const message = { role: 'assistant', content: fullContent };
       if (toolCalls.length > 0) {

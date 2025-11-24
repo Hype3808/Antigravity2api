@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  antigravity2api:
+    image: ghcr.io/hype3808/antigravity2api:latest
+    container_name: antigravity2api
+    restart: unless-stopped
+    ports:
+      - "8045:8045"
+    volumes:
+      # Persist data directory (accounts, tokens, etc.)
+      - ./data:/app/data
+      # Persist uploads directory
+      - ./uploads:/app/uploads
+      # Mount config for easy updates without rebuild
+      - ./config.json:/app/config.json:ro
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+    networks:
+      - antigravity-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8045/admin/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  antigravity-network:
+    driver: bridge

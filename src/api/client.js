@@ -104,6 +104,73 @@ export async function generateAssistantResponse(requestBody, callback) {
   }
 }
 
+// Generate a complete non-streaming response for fake streaming
+export async function generateCompleteResponse(requestBody) {
+  const token = await tokenManager.getToken();
+
+  if (!token) {
+    throw new Error('没有可用的token，请运行 npm run login 获取token');
+  }
+
+  // Use non-streaming endpoint (remove ?alt=sse)
+  const url = config.api.url.replace('streamGenerateContent?alt=sse', 'generateContent');
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Host': config.api.host,
+      'User-Agent': config.api.userAgent,
+      'Authorization': `Bearer ${token.access_token}`,
+      'Content-Type': 'application/json',
+      'Accept-Encoding': 'gzip'
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    if (response.status === 403) {
+      tokenManager.disableCurrentToken(token);
+      throw new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorText}`);
+    }
+    throw new Error(`API请求失败 (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  
+  let fullContent = '';
+  let toolCalls = [];
+  
+  const parts = data.response?.candidates?.[0]?.content?.parts;
+  if (parts) {
+    for (const part of parts) {
+      if (part.text !== undefined) {
+        let content = part.text || '';
+        if (part.thought_signature) {
+          content += `\n<!-- thought_signature: ${part.thought_signature} -->`;
+        }
+        if (part.inlineData) {
+          const mimeType = part.inlineData.mimeType;
+          const imageData = part.inlineData.data;
+          content += `\n![Generated Image](data:${mimeType};base64,${imageData})`;
+        }
+        fullContent += content;
+      } else if (part.functionCall) {
+        toolCalls.push({
+          id: part.functionCall.id,
+          type: 'function',
+          function: {
+            name: part.functionCall.name,
+            arguments: JSON.stringify(part.functionCall.args)
+          }
+        });
+      }
+    }
+  }
+  
+  return { fullContent, toolCalls };
+}
+
 export async function getAvailableModels() {
   const token = await tokenManager.getToken();
 
