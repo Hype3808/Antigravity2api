@@ -12,8 +12,8 @@ services:
       - ./data:/app/data
       # Persist uploads directory
       - ./uploads:/app/uploads
-      # Mount config for easy updates without rebuild
-      - ./config.json:/app/config.json:ro
+      # Mount config for dashboard settings editing
+      - ./config.json:/app/config.json
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
