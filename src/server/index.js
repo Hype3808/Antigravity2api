@@ -197,8 +197,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       };
 
-      // Start sending empty chunks every 3 seconds
-      const interval = setInterval(sendEmptyChunk, 3000);
+      // Start sending empty chunks every 1 second to maintain connection
+      const interval = setInterval(sendEmptyChunk, 1000);
 
       try {
         // Fetch complete non-streaming response
