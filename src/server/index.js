@@ -164,7 +164,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     
     const authHeader = req.headers.authorization;
     const apiKey = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-    const requestBody = generateRequestBody(messages, model, params, tools, apiKey);
+    // Use actualModel for the API request body, not the model with 假流式/ prefix
+    const requestBody = generateRequestBody(messages, actualModel, params, tools, apiKey);
 
     // Handle fake streaming
     if (isFakeStreaming && stream) {
