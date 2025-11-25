@@ -171,6 +171,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
 
       const id = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
@@ -187,13 +189,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       // Send empty chunks every 3 seconds while waiting for response
       const sendEmptyChunk = () => {
         if (!res.writableEnded) {
-          res.write(`data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model: actualModel,
-            choices: [{ index: 0, delta: { content: '' }, finish_reason: null }]
-          })}\n\n`);
+          try {
+            res.write(`data: ${JSON.stringify({
+              id,
+              object: 'chat.completion.chunk',
+              created,
+              model: actualModel,
+              choices: [{ index: 0, delta: { content: '' }, finish_reason: null }]
+            })}\n\n`);
+          } catch (err) {
+            logger.error('Error sending heartbeat chunk:', err.message);
+          }
         }
       };
 
@@ -203,6 +209,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       try {
         // Fetch complete non-streaming response
         const { fullContent, toolCalls } = await generateCompleteResponse(requestBody);
+        
+        // Clear interval before sending final chunks
+        clearInterval(interval);
+
+        // Clear interval before sending final chunks
+        clearInterval(interval);
 
         // Send tool calls if any
         if (toolCalls.length > 0) {
@@ -235,9 +247,28 @@ app.post('/v1/chat/completions', async (req, res) => {
           choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop' }]
         })}\n\n`);
         res.write('data: [DONE]\n\n');
-      } finally {
-        clearInterval(interval);
         res.end();
+      } catch (error) {
+        clearInterval(interval);
+        logger.error('Error in fake streaming:', error.message);
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model: actualModel,
+            choices: [{ index: 0, delta: { content: `Error: ${error.message}` }, finish_reason: null }]
+          })}\n\n`);
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model: actualModel,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+          })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
       }
       return;
     }
