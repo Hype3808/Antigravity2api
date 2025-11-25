@@ -175,6 +175,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       const id = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
 
+      // Send initial role
+      res.write(`data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model: actualModel,
+        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+      })}\n\n`);
+
       // Send empty chunks every 3 seconds while waiting for response
       const sendEmptyChunk = () => {
         if (!res.writableEnded) {
@@ -183,22 +192,10 @@ app.post('/v1/chat/completions', async (req, res) => {
             object: 'chat.completion.chunk',
             created,
             model: actualModel,
-            choices: [{ index: 0, delta: {}, finish_reason: null }]
+            choices: [{ index: 0, delta: { content: '' }, finish_reason: null }]
           })}\n\n`);
         }
       };
-
-      // Send initial role
-      res.write(`data: ${JSON.stringify({
-        id,
-        object: 'chat.completion.chunk',
-        created,
-        model: actualModel,
-        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
-      })}\n\n`);
-
-      // Send first empty chunk immediately
-      sendEmptyChunk();
 
       // Start sending empty chunks every 3 seconds
       const interval = setInterval(sendEmptyChunk, 3000);
