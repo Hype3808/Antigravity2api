@@ -182,8 +182,8 @@ app.post('/v1/chat/completions', async (req, res) => {
             id,
             object: 'chat.completion.chunk',
             created,
-            model,
-            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+            model: actualModel,
+            choices: [{ index: 0, delta: {}, finish_reason: null }]
           })}\n\n`);
         }
       };
@@ -193,9 +193,12 @@ app.post('/v1/chat/completions', async (req, res) => {
         id,
         object: 'chat.completion.chunk',
         created,
-        model,
+        model: actualModel,
         choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
       })}\n\n`);
+
+      // Send first empty chunk immediately
+      sendEmptyChunk();
 
       // Start sending empty chunks every 3 seconds
       const interval = setInterval(sendEmptyChunk, 3000);
@@ -210,7 +213,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             id,
             object: 'chat.completion.chunk',
             created,
-            model,
+            model: actualModel,
             choices: [{ index: 0, delta: { tool_calls: toolCalls }, finish_reason: null }]
           })}\n\n`);
         }
@@ -221,7 +224,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             id,
             object: 'chat.completion.chunk',
             created,
-            model,
+            model: actualModel,
             choices: [{ index: 0, delta: { content: fullContent }, finish_reason: null }]
           })}\n\n`);
         }
@@ -231,7 +234,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           id,
           object: 'chat.completion.chunk',
           created,
-          model,
+          model: actualModel,
           choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop' }]
         })}\n\n`);
         res.write('data: [DONE]\n\n');
