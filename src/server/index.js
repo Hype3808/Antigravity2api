@@ -2,13 +2,14 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { generateAssistantResponse, generateCompleteResponse, getAvailableModels } from '../api/client.js';
+import { generateAssistantResponse, generateAssistantResponseNoStream, getAvailableModels, closeRequester } from '../api/client.js';
 import { generateRequestBody } from '../utils/utils.js';
 import logger from '../utils/logger.js';
 import config from '../config/config.js';
 import adminRoutes, { incrementRequestCount, addLog } from '../admin/routes.js';
 import { validateKey, checkRateLimit } from '../admin/key_manager.js';
 import idleManager from '../utils/idle_manager.js';
+import tokenManager from '../auth/token_manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +34,9 @@ app.use(express.json({ limit: config.security.maxRequestSize }));
 
 // 静态文件服务 - 提供管理控制台页面
 app.use(express.static(path.join(process.cwd(), 'client/dist')));
+
+// 静态文件服务：提供图片访问
+app.use('/images', express.static(path.join(process.cwd(), 'public/images')));
 
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
@@ -143,6 +147,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!messages) {
       return res.status(400).json({ error: 'messages is required' });
     }
+    
+    const token = await tokenManager.getToken();
+    if (!token) {
+      throw new Error('没有可用的token，请运行 npm run login 获取token');
+    }
 
     // Check if fake streaming is requested
     const isFakeStreaming = model && model.startsWith('假流式/');
@@ -150,6 +159,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (isFakeStreaming) {
       actualModel = model.slice('假流式/'.length);
     }
+    
+    // Check if image model is requested
+    const isImageModel = actualModel.includes('-image');
 
     // 智能检测：NewAPI测速请求通常消息很简单，强制使用非流式响应
     // 检测条件：单条消息 + 内容很短（如 "hi", "test" 等）
@@ -166,6 +178,17 @@ app.post('/v1/chat/completions', async (req, res) => {
     const apiKey = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
     // Use actualModel for the API request body, not the model with 假流式/ prefix
     const requestBody = generateRequestBody(messages, actualModel, params, tools, apiKey);
+    
+    // Handle image model configuration
+    if (isImageModel) {
+      requestBody.request.generationConfig = {
+        candidateCount: 1,
+      };
+      requestBody.requestType = "image_gen";
+      requestBody.request.systemInstruction.parts[0].text += "现在你作为绘画模型聚焦于帮助用户生成图片";
+      delete requestBody.request.tools;
+      delete requestBody.request.toolConfig;
+    }
 
     // Handle fake streaming
     if (isFakeStreaming && stream) {
@@ -209,11 +232,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       try {
         // Fetch complete non-streaming response
-        const { fullContent, toolCalls } = await generateCompleteResponse(requestBody);
+        const { content, toolCalls } = await generateAssistantResponseNoStream(requestBody, token);
         
-        // Clear interval before sending final chunks
-        clearInterval(interval);
-
         // Clear interval before sending final chunks
         clearInterval(interval);
 
@@ -229,7 +249,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
 
         // Send content
-        if (fullContent) {
+        if (content) {
           res.write(`data: ${JSON.stringify({
             id,
             object: 'chat.completion.chunk',
@@ -281,62 +301,57 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       const id = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
-      let hasToolCall = false;
-
-      await generateAssistantResponse(requestBody, (data) => {
-        if (data.type === 'tool_calls') {
-          hasToolCall = true;
-          res.write(`data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [{ index: 0, delta: { tool_calls: data.tool_calls }, finish_reason: null }]
-          })}\n\n`);
-        } else {
-          res.write(`data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [{ index: 0, delta: { content: data.content }, finish_reason: null }]
-          })}\n\n`);
-        }
-      });
-
-      res.write(`data: ${JSON.stringify({
-        id,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: {}, finish_reason: hasToolCall ? 'tool_calls' : 'stop' }]
-      })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    } else if (!stream) {
-      // Non-streaming response - use generateCompleteResponse for fake streaming models
-      let fullContent = '';
-      let toolCalls = [];
       
-      if (isFakeStreaming) {
-        const result = await generateCompleteResponse(requestBody);
-        fullContent = result.fullContent;
-        toolCalls = result.toolCalls;
+      if (isImageModel) {
+        const { content } = await generateAssistantResponseNoStream(requestBody, token);
+        res.write(`data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta: { content }, finish_reason: null }]
+        })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
       } else {
-        await generateAssistantResponse(requestBody, (data) => {
-          if (data.type === 'tool_calls') {
-            toolCalls = data.tool_calls;
-          } else {
-            fullContent += data.content;
-          }
+        let hasToolCall = false;
+        await generateAssistantResponse(requestBody, token, (data) => {
+          const delta = data.type === 'tool_calls' 
+            ? { tool_calls: data.tool_calls } 
+            : { content: data.content };
+          if (data.type === 'tool_calls') hasToolCall = true;
+          res.write(`data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta, finish_reason: null }]
+          })}\n\n`);
         });
-      }
 
-      const message = { role: 'assistant', content: fullContent };
-      if (toolCalls.length > 0) {
-        message.tool_calls = toolCalls;
+        res.write(`data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: hasToolCall ? 'tool_calls' : 'stop' }]
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
       }
-
+    } else if (!stream) {
+      // Non-streaming response
+      const { content, toolCalls } = await generateAssistantResponseNoStream(requestBody, token);
+      const message = { role: 'assistant', content };
+      if (toolCalls.length > 0) message.tool_calls = toolCalls;
+      
       res.json({
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -409,6 +424,9 @@ const shutdown = () => {
 
   // 清理空闲管理器
   idleManager.destroy();
+  
+  // 关闭 AntigravityRequester
+  closeRequester();
 
   server.close(() => {
     logger.info('服务器已关闭');

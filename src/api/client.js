@@ -1,215 +1,281 @@
+import axios from 'axios';
 import tokenManager from '../auth/token_manager.js';
 import config from '../config/config.js';
+import { generateToolCallId } from '../utils/idGenerator.js';
+import AntigravityRequester from '../AntigravityRequester.js';
+import { saveBase64Image } from '../utils/imageStorage.js';
 
-export async function generateAssistantResponse(requestBody, callback) {
-  const token = await tokenManager.getToken();
+// 请求客户端：优先使用 AntigravityRequester，失败则降级到 axios
+let requester = null;
+let useAxios = false;
 
-  if (!token) {
-    throw new Error('没有可用的token，请运行 npm run login 获取token');
-  }
-
-  const url = config.api.url;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Host': config.api.host,
-      'User-Agent': config.api.userAgent,
-      'Authorization': `Bearer ${token.access_token}`,
-      'Content-Type': 'application/json',
-      'Accept-Encoding': 'gzip'
-    },
-    body: JSON.stringify(requestBody)
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    if (response.status === 403) {
-      tokenManager.disableCurrentToken(token);
-      throw new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorText}`);
-    }
-    throw new Error(`API请求失败 (${response.status}): ${errorText}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let thinkingStarted = false;
-  let toolCalls = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    const chunk = decoder.decode(value);
-    const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
-
-    for (const line of lines) {
-      const jsonStr = line.slice(6);
-      try {
-        const data = JSON.parse(jsonStr);
-        const parts = data.response?.candidates?.[0]?.content?.parts;
-        if (parts) {
-          for (const part of parts) {
-            if (part.thought === true) {
-              if (!thinkingStarted) {
-                callback({ type: 'thinking', content: '<think>\n' });
-                thinkingStarted = true;
-              }
-              callback({ type: 'thinking', content: part.text || '' });
-            } else if (part.text !== undefined) {
-              if (thinkingStarted) {
-                callback({ type: 'thinking', content: '\n</think>\n' });
-                thinkingStarted = false;
-              }
-              let content = part.text || '';
-              if (part.thought_signature) {
-                content += `\n<!-- thought_signature: ${part.thought_signature} -->`;
-              }
-
-              if (part.inlineData) {
-                const mimeType = part.inlineData.mimeType;
-                const data = part.inlineData.data;
-                content += `\n![Generated Image](data:${mimeType};base64,${data})`;
-              }
-
-              if (content) {
-                callback({ type: 'text', content: content });
-              }
-            } else if (part.functionCall) {
-              toolCalls.push({
-                id: part.functionCall.id,
-                type: 'function',
-                function: {
-                  name: part.functionCall.name,
-                  arguments: JSON.stringify(part.functionCall.args)
-                }
-              });
-            }
-          }
-        }
-
-        // 当遇到 finishReason 时，发送所有收集的工具调用
-        if (data.response?.candidates?.[0]?.finishReason && toolCalls.length > 0) {
-          if (thinkingStarted) {
-            callback({ type: 'thinking', content: '\n</think>\n' });
-            thinkingStarted = false;
-          }
-          callback({ type: 'tool_calls', tool_calls: toolCalls });
-          toolCalls = [];
-        }
-      } catch (e) {
-        // 忽略解析错误
-      }
-    }
+if (config.useNativeAxios === true) {
+  useAxios = true;
+} else {
+  try {
+    requester = new AntigravityRequester();
+  } catch (error) {
+    console.warn('AntigravityRequester 初始化失败，降级使用 axios:', error.message);
+    useAxios = true;
   }
 }
 
-// Generate a complete non-streaming response for fake streaming
-export async function generateCompleteResponse(requestBody) {
-  const token = await tokenManager.getToken();
+// ==================== 辅助函数 ====================
 
-  if (!token) {
-    throw new Error('没有可用的token，请运行 npm run login 获取token');
-  }
+function buildHeaders(token) {
+  return {
+    'Host': config.api.host,
+    'User-Agent': config.api.userAgent,
+    'Authorization': `Bearer ${token.access_token}`,
+    'Content-Type': 'application/json',
+    'Accept-Encoding': 'gzip'
+  };
+}
 
-  // Use non-streaming endpoint (remove ?alt=sse)
-  const url = config.api.url.replace('streamGenerateContent?alt=sse', 'generateContent');
-
-  const response = await fetch(url, {
+function buildAxiosConfig(url, headers, body = null) {
+  const axiosConfig = {
     method: 'POST',
-    headers: {
-      'Host': config.api.host,
-      'User-Agent': config.api.userAgent,
-      'Authorization': `Bearer ${token.access_token}`,
-      'Content-Type': 'application/json',
-      'Accept-Encoding': 'gzip'
-    },
-    body: JSON.stringify(requestBody)
-  });
+    url,
+    headers,
+    timeout: config.timeout,
+    proxy: config.proxy ? (() => {
+      const proxyUrl = new URL(config.proxy);
+      return { protocol: proxyUrl.protocol.replace(':', ''), host: proxyUrl.hostname, port: parseInt(proxyUrl.port) };
+    })() : false
+  };
+  if (body !== null) axiosConfig.data = body;
+  return axiosConfig;
+}
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    if (response.status === 403) {
-      tokenManager.disableCurrentToken(token);
-      throw new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorText}`);
+function buildRequesterConfig(headers, body = null) {
+  const reqConfig = {
+    method: 'POST',
+    headers,
+    timeout_ms: config.timeout,
+    proxy: config.proxy
+  };
+  if (body !== null) reqConfig.body = JSON.stringify(body);
+  return reqConfig;
+}
+
+// 统一错误处理
+async function handleApiError(error, token) {
+  const status = error.response?.status || error.status || 'Unknown';
+  let errorBody = error.message;
+  
+  if (error.response?.data?.readable) {
+    const chunks = [];
+    for await (const chunk of error.response.data) {
+      chunks.push(chunk);
     }
-    throw new Error(`API请求失败 (${response.status}): ${errorText}`);
+    errorBody = Buffer.concat(chunks).toString();
+  } else if (typeof error.response?.data === 'object') {
+    errorBody = JSON.stringify(error.response.data, null, 2);
+  } else if (error.response?.data) {
+    errorBody = error.response.data;
   }
+  
+  if (status === 403) {
+    tokenManager.disableCurrentToken(token);
+    throw new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`);
+  }
+  
+  throw new Error(`API请求失败 (${status}): ${errorBody}`);
+}
 
-  const data = await response.json();
+// 转换 functionCall 为 OpenAI 格式
+function convertToToolCall(functionCall) {
+  return {
+    id: functionCall.id || generateToolCallId(),
+    type: 'function',
+    function: {
+      name: functionCall.name,
+      arguments: JSON.stringify(functionCall.args)
+    }
+  };
+}
+
+// 解析并发送流式响应片段（会修改 state 并触发 callback）
+function parseAndEmitStreamChunk(line, state, callback) {
+  if (!line.startsWith('data: ')) return;
   
-  let fullContent = '';
-  let toolCalls = [];
-  
-  const parts = data.response?.candidates?.[0]?.content?.parts;
-  if (parts) {
-    for (const part of parts) {
-      if (part.text !== undefined) {
-        let content = part.text || '';
-        if (part.thought_signature) {
-          content += `\n<!-- thought_signature: ${part.thought_signature} -->`;
-        }
-        if (part.inlineData) {
-          const mimeType = part.inlineData.mimeType;
-          const imageData = part.inlineData.data;
-          content += `\n![Generated Image](data:${mimeType};base64,${imageData})`;
-        }
-        fullContent += content;
-      } else if (part.functionCall) {
-        toolCalls.push({
-          id: part.functionCall.id,
-          type: 'function',
-          function: {
-            name: part.functionCall.name,
-            arguments: JSON.stringify(part.functionCall.args)
+  try {
+    const data = JSON.parse(line.slice(6));
+    const parts = data.response?.candidates?.[0]?.content?.parts;
+    
+    if (parts) {
+      for (const part of parts) {
+        if (part.thought === true) {
+          // 思维链内容
+          if (!state.thinkingStarted) {
+            callback({ type: 'thinking', content: '<think>\n' });
+            state.thinkingStarted = true;
           }
-        });
+          callback({ type: 'thinking', content: part.text || '' });
+        } else if (part.text !== undefined) {
+          // 普通文本内容
+          if (state.thinkingStarted) {
+            callback({ type: 'thinking', content: '\n</think>\n' });
+            state.thinkingStarted = false;
+          }
+          callback({ type: 'text', content: part.text });
+        } else if (part.functionCall) {
+          // 工具调用
+          state.toolCalls.push(convertToToolCall(part.functionCall));
+        }
       }
     }
+    
+    // 响应结束时发送工具调用
+    if (data.response?.candidates?.[0]?.finishReason && state.toolCalls.length > 0) {
+      if (state.thinkingStarted) {
+        callback({ type: 'thinking', content: '\n</think>\n' });
+        state.thinkingStarted = false;
+      }
+      callback({ type: 'tool_calls', tool_calls: state.toolCalls });
+      state.toolCalls = [];
+    }
+  } catch (e) {
+    // 忽略 JSON 解析错误
   }
+}
+
+// ==================== 导出函数 ====================
+
+export async function generateAssistantResponse(requestBody, token, callback) {
   
-  return { fullContent, toolCalls };
+  const headers = buildHeaders(token);
+  const state = { thinkingStarted: false, toolCalls: [] };
+  let buffer = ''; // 缓冲区：处理跨 chunk 的不完整行
+  
+  const processChunk = (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // 保留最后一行（可能不完整）
+    lines.forEach(line => parseAndEmitStreamChunk(line, state, callback));
+  };
+  
+  if (useAxios) {
+    try {
+      const axiosConfig = { ...buildAxiosConfig(config.api.url, headers, requestBody), responseType: 'stream' };
+      const response = await axios(axiosConfig);
+      
+      response.data.on('data', chunk => processChunk(chunk.toString()));
+      await new Promise((resolve, reject) => {
+        response.data.on('end', resolve);
+        response.data.on('error', reject);
+      });
+    } catch (error) {
+      await handleApiError(error, token);
+    }
+  } else {
+    try {
+      const streamResponse = requester.antigravity_fetchStream(config.api.url, buildRequesterConfig(headers, requestBody));
+      let errorBody = '';
+      let statusCode = null;
+
+      await new Promise((resolve, reject) => {
+        streamResponse
+          .onStart(({ status }) => { statusCode = status; })
+          .onData((chunk) => statusCode !== 200 ? errorBody += chunk : processChunk(chunk))
+          .onEnd(() => statusCode !== 200 ? reject({ status: statusCode, message: errorBody }) : resolve())
+          .onError(reject);
+      });
+    } catch (error) {
+      await handleApiError(error, token);
+    }
+  }
 }
 
 export async function getAvailableModels() {
   const token = await tokenManager.getToken();
-
-  if (!token) {
-    throw new Error('没有可用的token，请运行 npm run login 获取token');
-  }
-
-  const response = await fetch(config.api.modelsUrl, {
-    method: 'POST',
-    headers: {
-      'Host': config.api.host,
-      'User-Agent': config.api.userAgent,
-      'Authorization': `Bearer ${token.access_token}`,
-      'Content-Type': 'application/json',
-      'Accept-Encoding': 'gzip'
-    },
-    body: JSON.stringify({})
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`获取模型列表失败 (${response.status}): ${errorText}`);
-  }
-
-  const responseText = await response.text();
-  let data;
+  if (!token) throw new Error('没有可用的token，请运行 npm run login 获取token');
+  
+  const headers = buildHeaders(token);
+  
   try {
-    data = JSON.parse(responseText);
-  } catch (e) {
-    throw new Error(`JSON解析失败: ${e.message}. 原始响应: ${responseText.substring(0, 200)}`);
+    let data;
+    if (useAxios) {
+      data = (await axios(buildAxiosConfig(config.api.modelsUrl, headers, {}))).data;
+    } else {
+      const response = await requester.antigravity_fetch(config.api.modelsUrl, buildRequesterConfig(headers, {}));
+      if (response.status !== 200) {
+        const errorBody = await response.text();
+        throw { status: response.status, message: errorBody };
+      }
+      data = await response.json();
+    }
+    
+    return {
+      object: 'list',
+      data: Object.keys(data.models).map(id => ({
+        id,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'google'
+      }))
+    };
+  } catch (error) {
+    await handleApiError(error, token);
   }
+}
 
-  return {
-    object: 'list',
-    data: Object.keys(data.models).map(id => ({
-      id,
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: 'google'
-    }))
-  };
+export async function generateAssistantResponseNoStream(requestBody, token) {
+  
+  const headers = buildHeaders(token);
+  let data;
+  
+  try {
+    if (useAxios) {
+      data = (await axios(buildAxiosConfig(config.api.noStreamUrl, headers, requestBody))).data;
+    } else {
+      const response = await requester.antigravity_fetch(config.api.noStreamUrl, buildRequesterConfig(headers, requestBody));
+      if (response.status !== 200) {
+        const errorBody = await response.text();
+        throw { status: response.status, message: errorBody };
+      }
+      data = await response.json();
+    }
+  } catch (error) {
+    await handleApiError(error, token);
+  }
+  
+  // 解析响应内容
+  const parts = data.response?.candidates?.[0]?.content?.parts || [];
+  let content = '';
+  let thinkingContent = '';
+  const toolCalls = [];
+  const imageUrls = [];
+  
+  for (const part of parts) {
+    if (part.thought === true) {
+      thinkingContent += part.text || '';
+    } else if (part.text !== undefined) {
+      content += part.text;
+    } else if (part.functionCall) {
+      toolCalls.push(convertToToolCall(part.functionCall));
+    } else if (part.inlineData) {
+      // 保存图片到本地并获取 URL
+      const imageUrl = saveBase64Image(part.inlineData.data, part.inlineData.mimeType);
+      imageUrls.push(imageUrl);
+    }
+  }
+  
+  // 拼接思维链标签
+  if (thinkingContent) {
+    content = `<think>\n${thinkingContent}\n</think>\n${content}`;
+  }
+  
+  // 生图模型：转换为 markdown 格式
+  if (imageUrls.length > 0) {
+    let markdown = content ? content + '\n\n' : '';
+    markdown += imageUrls.map(url => `![image](${url})`).join('\n\n');
+    return { content: markdown, toolCalls };
+  }
+  
+  return { content, toolCalls };
+}
+
+export function closeRequester() {
+  if (requester) requester.close();
 }

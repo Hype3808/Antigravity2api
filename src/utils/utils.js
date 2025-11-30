@@ -1,22 +1,6 @@
-import { randomUUID } from 'crypto';
 import config from '../config/config.js';
-
-function generateRequestId() {
-  return `agent-${randomUUID()}`;
-}
-
-function generateSessionId() {
-  return String(-Math.floor(Math.random() * 9e18));
-}
-
-function generateProjectId() {
-  const adjectives = ['useful', 'bright', 'swift', 'calm', 'bold'];
-  const nouns = ['fuze', 'wave', 'spark', 'flow', 'core'];
-  const randomAdj = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const randomNoun = nouns[Math.floor(Math.random() * nouns.length)];
-  const randomNum = Math.random().toString(36).substring(2, 7);
-  return `${randomAdj}-${randomNoun}-${randomNum}`;
-}
+import { generateRequestId, generateSessionId, generateProjectId } from './idGenerator.js';
+import os from 'os';
 function extractImagesFromContent(content) {
   const result = { text: '', images: [] };
 
@@ -171,9 +155,14 @@ function openaiMessageToAntigravity(openaiMessages) {
   return antigravityMessages;
 }
 function generateGenerationConfig(parameters, enableThinking, actualModelName) {
+  // Clamp topK to valid range (1-64)
+  let topK = parameters.top_k ?? config.defaults.top_k;
+  if (topK > 64) topK = 64;
+  if (topK < 1) topK = 1;
+  
   const generationConfig = {
     topP: parameters.top_p ?? config.defaults.top_p,
-    topK: parameters.top_k ?? config.defaults.top_k,
+    topK: topK,
     temperature: parameters.temperature ?? config.defaults.temperature,
     candidateCount: 1,
     maxOutputTokens: parameters.max_tokens ?? config.defaults.max_tokens,
@@ -183,16 +172,12 @@ function generateGenerationConfig(parameters, enableThinking, actualModelName) {
       "<|context_request|>",
       "<|endoftext|>",
       "<|end_of_turn|>"
-    ]
+    ],
+    thinkingConfig: {
+      includeThoughts: enableThinking,
+      thinkingBudget: enableThinking ? 1024 : 0
+    }
   }
-
-  if (enableThinking) {
-    generationConfig.thinkingConfig = {
-      includeThoughts: true,
-      thinkingBudget: 1024
-    };
-  }
-
   if (enableThinking && actualModelName.includes("claude")) {
     delete generationConfig.topP;
   }
@@ -280,9 +265,25 @@ function generateRequestBody(openaiMessages, modelName, parameters, openaiTools,
     userAgent: "antigravity"
   }
 }
+function getDefaultIp() {
+  const interfaces = os.networkInterfaces();
+  if (interfaces.WLAN) {
+    for (const inter of interfaces.WLAN) {
+      if (inter.family === 'IPv4' && !inter.internal) {
+        return inter.address;
+      }
+    }
+  } else if (interfaces.wlan2) {
+    for (const inter of interfaces.wlan2) {
+      if (inter.family === 'IPv4' && !inter.internal) {
+        return inter.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
 export {
   generateRequestId,
-  generateSessionId,
-  generateProjectId,
-  generateRequestBody
+  generateRequestBody,
+  getDefaultIp
 }

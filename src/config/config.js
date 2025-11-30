@@ -6,11 +6,17 @@ const defaultConfig = {
   api: {
     url: 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse',
     modelsUrl: 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
+    noStreamUrl: 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent',
     host: 'daily-cloudcode-pa.sandbox.googleapis.com',
     userAgent: 'antigravity/1.11.3 windows/amd64'
   },
   defaults: { temperature: 1, top_p: 0.85, top_k: 50, max_tokens: 8096 },
   security: { maxRequestSize: '50mb', apiKey: null },
+  useNativeAxios: true,
+  timeout: 180000,
+  proxy: null,
+  imageBaseUrl: null,
+  maxImages: 10,
   systemInstruction: '你是聊天机器人，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演，也可以提供数学或者代码上的建议'
 };
 

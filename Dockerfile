@@ -29,11 +29,15 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY config.json ./
 
+# Copy and make the AntigravityRequester binary executable
+COPY src/bin/ ./src/bin/
+RUN chmod +x ./src/bin/antigravity_requester_linux_amd64 2>/dev/null || true
+
 # Copy built client from builder stage
 COPY --from=client-builder /app/client/dist ./client/dist
 
 # Create necessary directories
-RUN mkdir -p data uploads
+RUN mkdir -p data uploads public/images
 
 # Expose the port
 EXPOSE 8045

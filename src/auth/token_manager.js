@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from '../utils/logger.js';
+import { generateProjectId, generateSessionId } from '../utils/idGenerator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,33 +19,48 @@ class TokenManager {
     this.loadInterval = 60000; // 1分钟内不重复加载
     this.cachedData = null; // 缓存文件数据，减少磁盘读取
     this.usageStats = new Map(); // Token 使用统计 { refresh_token -> { requests, lastUsed } }
-    this.loadTokens();
+    this.initialize();
   }
 
-  loadTokens() {
+  initialize() {
     try {
-      // 避免频繁加载，1分钟内使用缓存
-      if (Date.now() - this.lastLoadTime < this.loadInterval && this.tokens.length > 0) {
-        return;
-      }
-
-      log.info('正在加载token...');
+      log.info('正在初始化token管理器...');
       const data = fs.readFileSync(this.filePath, 'utf8');
-      const tokenArray = JSON.parse(data);
-      this.cachedData = tokenArray; // 缓存原始数据
-      this.tokens = tokenArray.filter(token => token.enable !== false);
+      let tokenArray = JSON.parse(data);
+      let needSave = false;
+      
+      tokenArray = tokenArray.map(token => {
+        if (!token.projectId) {
+          token.projectId = generateProjectId();
+          needSave = true;
+        }
+        return token;
+      });
+      
+      if (needSave) {
+        fs.writeFileSync(this.filePath, JSON.stringify(tokenArray, null, 2), 'utf8');
+      }
+      
+      this.cachedData = tokenArray;
+      this.tokens = tokenArray.filter(token => token.enable !== false).map(token => ({
+        ...token,
+        sessionId: generateSessionId()
+      }));
       this.currentIndex = 0;
       this.lastLoadTime = Date.now();
       log.info(`成功加载 ${this.tokens.length} 个可用token`);
-
-      // 触发垃圾回收（如果可用）
-      if (global.gc) {
-        global.gc();
-      }
     } catch (error) {
-      log.error('加载token失败:', error.message);
+      log.error('初始化token失败:', error.message);
       this.tokens = [];
     }
+  }
+
+  loadTokens() {
+    // 避免频繁加载，1分钟内使用缓存
+    if (Date.now() - this.lastLoadTime < this.loadInterval && this.tokens.length > 0) {
+      return;
+    }
+    this.initialize();
   }
 
   isExpired(token) {
@@ -97,7 +113,10 @@ class TokenManager {
 
       this.tokens.forEach(memToken => {
         const index = allTokens.findIndex(t => t.refresh_token === memToken.refresh_token);
-        if (index !== -1) allTokens[index] = memToken;
+        if (index !== -1) {
+          const { sessionId, ...tokenToSave } = memToken;
+          allTokens[index] = tokenToSave;
+        }
       });
 
       fs.writeFileSync(this.filePath, JSON.stringify(allTokens, null, 2), 'utf8');
@@ -108,20 +127,22 @@ class TokenManager {
   }
 
   disableToken(token) {
-    log.warn(`禁用token`)
+    log.warn(`禁用token ...${token.access_token.slice(-8)}`)
     token.enable = false;
     this.saveToFile();
-    this.loadTokens();
+    this.tokens = this.tokens.filter(t => t.refresh_token !== token.refresh_token);
+    this.currentIndex = this.currentIndex % Math.max(this.tokens.length, 1);
   }
 
   async getToken() {
     this.loadTokens();
     if (this.tokens.length === 0) return null;
 
-    for (let i = 0; i < this.tokens.length; i++) {
-      const token = this.tokens[this.currentIndex];
-      const tokenIndex = this.currentIndex;
+    const totalTokens = this.tokens.length;
 
+    for (let i = 0; i < totalTokens; i++) {
+      const token = this.tokens[this.currentIndex];
+      
       try {
         if (this.isExpired(token)) {
           await this.refreshToken(token);
@@ -130,18 +151,18 @@ class TokenManager {
 
         // 记录使用统计
         this.recordUsage(token);
-        log.info(`🔄 轮询使用 Token #${tokenIndex} (总请求: ${this.getTokenRequests(token)})`);
 
         return token;
       } catch (error) {
-        if (error.statusCode === 403) {
-          log.warn(`Token ${this.currentIndex} 刷新失败(403)，禁用并尝试下一个`);
+        if (error.statusCode === 403 || error.statusCode === 400) {
+          const accountNum = this.currentIndex + 1;
+          log.warn(`账号 ${accountNum}: Token 已失效或错误，已自动禁用该账号`);
           this.disableToken(token);
+          if (this.tokens.length === 0) return null;
         } else {
-          log.error(`Token ${this.currentIndex} 刷新失败:`, error.message);
+          log.error(`Token ${this.currentIndex + 1} 刷新失败:`, error.message);
+          this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
         }
-        this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
-        if (this.tokens.length === 0) return null;
       }
     }
 
