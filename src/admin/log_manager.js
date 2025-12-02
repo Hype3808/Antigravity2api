@@ -40,6 +40,14 @@ export async function loadLogs() {
       lastCacheTime = now;
       return [];
     }
+    // If JSON is corrupted, reset the logs file
+    if (error instanceof SyntaxError) {
+      console.error('Corrupted logs file detected, resetting:', error.message);
+      logsCache = [];
+      lastCacheTime = now;
+      await saveLogs([]);
+      return [];
+    }
     throw error;
   }
 }
