@@ -255,7 +255,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             object: 'chat.completion.chunk',
             created,
             model: actualModel,
-            choices: [{ index: 0, delta: { content: fullContent }, finish_reason: null }]
+            choices: [{ index: 0, delta: { content: content }, finish_reason: null }]
           })}\n\n`);
         }
 
